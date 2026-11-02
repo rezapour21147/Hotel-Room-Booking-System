@@ -33,14 +33,25 @@ class Booking(models.Model):
     class Status(models.TextChoices):
         CONFIRMED = "confirmed", "Confirmed"
         CANCELLED = "cancelled", "Cancelled"
+        # Replaced by a newer booking (see `rescheduled_from`); not a cancellation.
+        RESCHEDULED = "rescheduled", "Rescheduled"
 
     user_id = models.PositiveIntegerField(db_index=True)
     room = models.ForeignKey(Room, on_delete=models.PROTECT, related_name="bookings")
     check_in = models.DateTimeField()
     check_out = models.DateTimeField()
-    # Cancelled bookings are kept for history but no longer block the room.
+    # Only CONFIRMED bookings block a room; the other statuses are kept for history.
     status = models.CharField(
-        max_length=10, choices=Status.choices, default=Status.CONFIRMED
+        max_length=12, choices=Status.choices, default=Status.CONFIRMED
+    )
+    # Reschedule chain: the new booking points back at the one it replaced.
+    # OneToOne => a booking can be replaced only once, so history never branches.
+    rescheduled_from = models.OneToOneField(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="rescheduled_to",
     )
     cancelled_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

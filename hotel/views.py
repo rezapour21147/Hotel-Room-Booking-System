@@ -9,14 +9,16 @@ from .serializers import (
     AvailabilityQuerySerializer,
     BookingRequestSerializer,
     BookingSerializer,
+    RescheduleRequestSerializer,
     RoomSerializer,
 )
 from .services import (
-    BookingNotCancellable,
+    BookingStateError,
     NoRoomAvailable,
     available_rooms,
     book_room,
     cancel_booking,
+    reschedule_booking,
 )
 
 
@@ -61,7 +63,7 @@ class BookingViewSet(
     serializer_class = BookingSerializer
 
     def get_queryset(self):
-        qs = Booking.objects.select_related("room")
+        qs = Booking.objects.select_related("room", "rescheduled_to")
         params = self.request.query_params
         user_id = params.get("user_id")
         if user_id and user_id.isdigit():
@@ -84,6 +86,23 @@ class BookingViewSet(
         booking = self.get_object()  # 404 if unknown
         try:
             booking = cancel_booking(booking.pk)
-        except BookingNotCancellable as exc:
+        except BookingStateError as exc:
             raise Conflict(str(exc))
         return Response(BookingSerializer(booking).data)
+
+    @action(detail=True, methods=["post"])
+    def reschedule(self, request, pk=None):
+        """Replace this booking with a new one for new dates (old one is kept)."""
+        booking = self.get_object()  # 404 if unknown
+        req = RescheduleRequestSerializer(data=request.data)
+        req.is_valid(raise_exception=True)
+        try:
+            new_booking = reschedule_booking(booking.pk, **req.validated_data)
+        except BookingStateError as exc:
+            raise Conflict(str(exc))
+        except NoRoomAvailable:
+            raise Conflict(
+                "No room is available for the new period; "
+                "the original booking is unchanged."
+            )
+        return Response(BookingSerializer(new_booking).data, status=status.HTTP_201_CREATED)

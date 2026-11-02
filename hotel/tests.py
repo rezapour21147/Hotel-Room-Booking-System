@@ -209,3 +209,78 @@ class BookingApiTests(APITestCase):
         self.assertEqual(self.available(check_in=dt(3), check_out=dt(2)).status_code, 400)
         self.assertEqual(self.available(check_in=ago(1), check_out=dt(2)).status_code, 400)
         self.assertEqual(self.available(check_in=dt(1), check_out=dt(2), view="moon").status_code, 400)
+
+        # --- rescheduling ---------------------------------------------------
+    def reschedule(self, booking_id, check_in, check_out):
+        return self.client.post(
+            f"/api/bookings/{booking_id}/reschedule/",
+            {"check_in": check_in, "check_out": check_out},
+        )
+
+    def test_reschedule_keeps_same_room_and_links_history(self):
+        old = self.book(dt(1), dt(3), user_id=5).data
+        r = self.reschedule(old["id"], dt(2), dt(4))  # overlaps its own old period
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data["room"]["label"], "101")
+        self.assertEqual(r.data["user_id"], 5)
+        self.assertEqual(r.data["status"], "confirmed")
+        self.assertEqual(r.data["rescheduled_from"], old["id"])
+        old_after = self.client.get(f"/api/bookings/{old['id']}/").data
+        self.assertEqual(old_after["status"], "rescheduled")
+        self.assertEqual(old_after["rescheduled_to"], r.data["id"])
+        self.assertIsNone(old_after["cancelled_at"])
+
+    def test_reschedule_falls_back_to_another_room(self):
+        old = self.book(dt(1), dt(3)).data           # 101
+        self.book(dt(5), dt(7), user_id=2)           # 101 busy for the new dates
+        r = self.reschedule(old["id"], dt(5), dt(7))
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data["room"]["label"], "102")
+
+    def test_reschedule_without_free_room_changes_nothing(self):
+        old = self.book(dt(1), dt(3)).data           # 101
+        self.book(dt(5), dt(7), user_id=2)           # 101
+        self.book(dt(5), dt(7), user_id=3)           # 102 -> both busy at the new dates
+        r = self.reschedule(old["id"], dt(5), dt(7))
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(Booking.objects.count(), 3)
+        again = self.client.get(f"/api/bookings/{old['id']}/").data
+        self.assertEqual(again["status"], "confirmed")
+        self.assertIsNone(again["rescheduled_to"])
+
+    def test_reschedule_frees_old_dates(self):
+        old = self.book(dt(1), dt(3)).data
+        self.reschedule(old["id"], dt(5), dt(7))
+        r = self.available(check_in=dt(1), check_out=dt(3), number_of_beds=2, view="sea")
+        self.assertEqual(self.labels(r), ["101", "102"])
+
+    def test_reschedule_chain_and_replaced_booking_is_final(self):
+        first = self.book(dt(1), dt(3)).data
+        second = self.reschedule(first["id"], dt(4), dt(6)).data
+        # the replaced booking cannot be rescheduled or cancelled again
+        self.assertEqual(self.reschedule(first["id"], dt(8), dt(9)).status_code, 409)
+        self.assertEqual(self.client.post(f"/api/bookings/{first['id']}/cancel/").status_code, 409)
+        # the newest one can be rescheduled again, extending the chain
+        third = self.reschedule(second["id"], dt(8), dt(9))
+        self.assertEqual(third.status_code, 201)
+        self.assertEqual(third.data["rescheduled_from"], second["id"])
+        self.assertEqual(self.client.get("/api/bookings/?status=rescheduled").data["count"], 2)
+
+    def test_reschedule_not_allowed_for_cancelled_or_started(self):
+        cancelled = self.book(dt(1), dt(3)).data
+        self.client.post(f"/api/bookings/{cancelled['id']}/cancel/")
+        self.assertEqual(self.reschedule(cancelled["id"], dt(5), dt(6)).status_code, 409)
+        started = Booking.objects.create(
+            user_id=1, room=self.r2,
+            check_in=datetime.now(timezone.utc) - timedelta(hours=1),
+            check_out=datetime.now(timezone.utc) + timedelta(days=1),
+        )
+        self.assertEqual(self.reschedule(started.pk, dt(5), dt(6)).status_code, 409)
+
+    def test_reschedule_validation_and_404(self):
+        old = self.book(dt(1), dt(3)).data
+        self.assertEqual(self.reschedule(old["id"], ago(1), ahead(2)).status_code, 400)
+        self.assertEqual(self.reschedule(old["id"], dt(4), dt(4)).status_code, 400)
+        self.assertEqual(self.client.post(f"/api/bookings/{old['id']}/reschedule/", {}).status_code, 400)
+        self.assertEqual(self.reschedule(999, dt(5), dt(6)).status_code, 404)
+        self.assertEqual(Booking.objects.count(), 1)

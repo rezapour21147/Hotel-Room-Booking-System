@@ -3,7 +3,7 @@ from rest_framework import serializers
 
 from .exceptions import Conflict
 from .models import Booking, Room
-
+from django.core.exceptions import ObjectDoesNotExist
 
 class RoomSerializer(serializers.ModelSerializer):
     view = serializers.ChoiceField(choices=Room.View.choices)
@@ -57,13 +57,24 @@ class AvailabilityQuerySerializer(PeriodSerializer):
     number_of_beds = serializers.IntegerField(min_value=1, max_value=5, required=False)
     view = serializers.ChoiceField(choices=Room.View.choices, required=False)
 
+class RescheduleRequestSerializer(PeriodSerializer):
+    """New dates for an existing booking; same rules as any other period."""
+
 
 class BookingSerializer(serializers.ModelSerializer):
     room = RoomSerializer(read_only=True)
+    rescheduled_to = serializers.SerializerMethodField()   
+
+    def get_rescheduled_to(self, obj):                    
+        try:
+            return obj.rescheduled_to.pk
+        except ObjectDoesNotExist:
+            return None
 
     class Meta:
         model = Booking
         fields = [
             "id", "user_id", "room", "check_in", "check_out",
-            "status", "cancelled_at", "created_at",
+            "status", "cancelled_at", "rescheduled_from", "rescheduled_to",
+            "created_at",
         ]

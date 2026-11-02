@@ -59,7 +59,18 @@ Returns the booking with `status: "cancelled"`. `409` if it is already cancelled
 already started; `404` if unknown. Cancelled bookings are kept (soft cancel) but no longer
 block the room.
 
-Also available: `GET /api/bookings/` (optional `?user_id=`, `?status=confirmed|cancelled`)
+### Reschedule - `POST /api/bookings/<id>/reschedule/`
+```json
+{"check_in": "2026-12-05T14:00:00Z", "check_out": "2026-12-07T11:00:00Z"}
+```
+Creates a **new** booking for the new dates and marks the old one `rescheduled`. The new
+booking has `rescheduled_from` (old id) and the old one shows `rescheduled_to` (new id).
+The same room is used if free, otherwise another room with the same features. `201` with
+the new booking; `409` if nothing is free for the new dates (the original booking is left
+unchanged) or if the booking is cancelled, already rescheduled or already started;
+`400` for invalid dates; `404` if unknown.
+
+Also available: `GET /api/bookings/` (optional `?user_id=`, `?status=confirmed|cancelled|rescheduled`)
 and `GET /api/bookings/<id>/`.
 
 Example:
@@ -88,8 +99,17 @@ curl -X POST localhost:8000/api/bookings/ -H 'Content-Type: application/json' \
 - **Layering:** views handle HTTP, serializers validate input, `services.book_room`
   holds the business logic.
 - **Cancellation:** a soft cancel (`status` + `cancelled_at`) keeps history and audit trail;
-  every overlap/availability query only considers `confirmed` bookings. Cancelling is only
+  every overlap/availability query only considers `confirmed` bookings (cancelled and
+  rescheduled ones never block a room). Cancelling is only
   allowed before check-in. The row is locked while cancelling so it can't race itself.
+- **Rescheduling:** bookings are treated as immutable records, so a reschedule creates a new
+  booking linked to the old one through a `OneToOneField` (`rescheduled_from`) instead of
+  editing dates in place. The old booking gets its own status, `rescheduled`, so reports can
+  tell it apart from a real cancellation. The one-to-one link means a booking can be
+  replaced only once (history is a chain, never a tree). It runs in one transaction: the
+  old booking's own period is ignored in the overlap check (so overlapping moves work), the
+  same room is tried first, then the other matching rooms, and if none is free everything
+  rolls back and the original stays confirmed. Like cancellation, only allowed before check-in.
 - **Past check-ins:** rejected with `400` for bookings and availability searches
   (`check_in` earlier than "now"); input validation lives in the serializers.
 - **Editing rooms:** beds/view changes are refused (`409`) while a confirmed booking has
@@ -103,5 +123,5 @@ curl -X POST localhost:8000/api/bookings/ -H 'Content-Type: application/json' \
   interpreted as UTC).
 - **No authentication/permissions** were added, as none were requested.
 - **Not handled / next steps:** the PostgreSQL exclusion constraint above, authentication
-  and per-user permissions (anyone can cancel any booking), and rescheduling a booking
-  (currently cancel + rebook).
+  and per-user permissions (anyone can cancel or reschedule any booking), and changing the
+  dates of a stay that is already in progress (e.g. extending it).
