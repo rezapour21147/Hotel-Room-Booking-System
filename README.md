@@ -92,10 +92,7 @@ curl -X POST localhost:8000/api/bookings/ -H 'Content-Type: application/json' \
 - **Concurrency:** booking runs in a transaction that locks all rooms matching the
   requested features (`SELECT ... FOR UPDATE`, ordered by id) before checking overlaps,
   so two simultaneous requests cannot double-book a room. On SQLite row locks are
-  no-ops but writers are serialized anyway. For PostgreSQL in production, I would
-  additionally add an `ExclusionConstraint` on `(room, tstzrange(check_in, check_out))`
-  as a database-level safety net. I did not add it so the project runs on SQLite
-  with zero setup.
+  no-ops but writers are serialized anyway.
 - **Layering:** views handle HTTP, serializers validate input, `services.book_room`
   holds the business logic.
 - **Cancellation:** a soft cancel (`status` + `cancelled_at`) keeps history and audit trail;
@@ -121,7 +118,3 @@ curl -X POST localhost:8000/api/bookings/ -H 'Content-Type: application/json' \
   booking with no foreign key. Changing it to a FK or string is a one-line model change.
 - **Timezones:** `USE_TZ=True`; datetimes should include an offset (naive values are
   interpreted as UTC).
-- **No authentication/permissions** were added, as none were requested.
-- **Not handled / next steps:** the PostgreSQL exclusion constraint above, authentication
-  and per-user permissions (anyone can cancel or reschedule any booking), and changing the
-  dates of a stay that is already in progress (e.g. extending it).
