@@ -1,21 +1,39 @@
+from django.db import transaction
 from rest_framework import mixins, status, viewsets
-from rest_framework.exceptions import APIException
+from rest_framework.decorators import action
 from rest_framework.response import Response
 
+from .exceptions import Conflict
 from .models import Booking, Room
-from .serializers import BookingRequestSerializer, BookingSerializer, RoomSerializer
-from .services import NoRoomAvailable, book_room
-
-
-class Conflict(APIException):
-    status_code = status.HTTP_409_CONFLICT
-    default_detail = "Conflict."
-    default_code = "conflict"
+from .serializers import (
+    AvailabilityQuerySerializer,
+    BookingRequestSerializer,
+    BookingSerializer,
+    RoomSerializer,
+)
+from .services import (
+    BookingNotCancellable,
+    NoRoomAvailable,
+    available_rooms,
+    book_room,
+    cancel_booking,
+)
 
 
 class RoomViewSet(viewsets.ModelViewSet):
-    queryset = Room.objects.all()
     serializer_class = RoomSerializer
+
+    def get_queryset(self):
+        qs = Room.objects.all()
+        if self.action in ("update", "partial_update"):
+            # Lock the row so a concurrent booking cannot slip in between the
+            # "has upcoming bookings?" check and the save.
+            qs = qs.select_for_update()
+        return qs
+
+    def update(self, request, *args, **kwargs):
+        with transaction.atomic():
+            return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         room = self.get_object()
@@ -23,6 +41,15 @@ class RoomViewSet(viewsets.ModelViewSet):
             raise Conflict("Room has bookings and cannot be deleted.")
         room.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=False, methods=["get"])
+    def available(self, request):
+        """GET /api/rooms/available/?check_in=&check_out=[&number_of_beds=][&view=]"""
+        query = AvailabilityQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        rooms = available_rooms(**query.validated_data)
+        page = self.paginate_queryset(rooms)
+        return self.get_paginated_response(self.get_serializer(page, many=True).data)
 
 
 class BookingViewSet(
@@ -35,9 +62,12 @@ class BookingViewSet(
 
     def get_queryset(self):
         qs = Booking.objects.select_related("room")
-        user_id = self.request.query_params.get("user_id")
+        params = self.request.query_params
+        user_id = params.get("user_id")
         if user_id and user_id.isdigit():
             qs = qs.filter(user_id=int(user_id))
+        if params.get("status") in Booking.Status.values:
+            qs = qs.filter(status=params["status"])
         return qs
 
     def create(self, request, *args, **kwargs):
@@ -48,3 +78,12 @@ class BookingViewSet(
         except NoRoomAvailable:
             raise Conflict("No room is available for the requested features and period.")
         return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, pk=None):
+        booking = self.get_object()  # 404 if unknown
+        try:
+            booking = cancel_booking(booking.pk)
+        except BookingNotCancellable as exc:
+            raise Conflict(str(exc))
+        return Response(BookingSerializer(booking).data)

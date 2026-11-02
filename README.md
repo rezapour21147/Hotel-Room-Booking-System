@@ -28,7 +28,17 @@ Browsable at `http://localhost:8000/api/`.
 {"label": "101", "number_of_beds": 2, "view": "sea"}
 ```
 `view` is one of `sea`, `mountain`, `yard`. `number_of_beds` is 1-5, `label` is unique.
-Deleting a room that has bookings returns `409`.
+Deleting a room that has bookings returns `409`. Changing `number_of_beds` or `view`
+of a room that has upcoming or ongoing confirmed bookings also returns `409` (cancel
+them first); renaming the label is always allowed.
+
+### Availability - `GET /api/rooms/available/`
+Query params: `check_in`, `check_out` (required), `number_of_beds`, `view` (optional).
+```
+GET /api/rooms/available/?check_in=2026-12-01T14:00:00Z&check_out=2026-12-03T11:00:00Z&view=sea
+```
+Returns the (paginated) rooms with no confirmed booking overlapping the period.
+URL-encode `+` in offsets as `%2B`, or use `Z`.
 
 ### Book a room - `POST /api/bookings/`
 ```json
@@ -42,9 +52,15 @@ Deleting a room that has bookings returns `409`.
 ```
 - `201` with the booking and the assigned room.
 - `409` if no room matches the features or all matching rooms are busy in that period.
-- `400` for invalid input (e.g. `check_out <= check_in`, bad view, beds outside 1-5).
+- `400` for invalid input (e.g. `check_in` in the past, `check_out <= check_in`, bad view, beds outside 1-5).
 
-Also available: `GET /api/bookings/` (optional `?user_id=`) and `GET /api/bookings/<id>/`.
+### Cancel - `POST /api/bookings/<id>/cancel/`
+Returns the booking with `status: "cancelled"`. `409` if it is already cancelled or has
+already started; `404` if unknown. Cancelled bookings are kept (soft cancel) but no longer
+block the room.
+
+Also available: `GET /api/bookings/` (optional `?user_id=`, `?status=confirmed|cancelled`)
+and `GET /api/bookings/<id>/`.
 
 Example:
 ```bash
@@ -71,6 +87,14 @@ curl -X POST localhost:8000/api/bookings/ -H 'Content-Type: application/json' \
   with zero setup.
 - **Layering:** views handle HTTP, serializers validate input, `services.book_room`
   holds the business logic.
+- **Cancellation:** a soft cancel (`status` + `cancelled_at`) keeps history and audit trail;
+  every overlap/availability query only considers `confirmed` bookings. Cancelling is only
+  allowed before check-in. The row is locked while cancelling so it can't race itself.
+- **Past check-ins:** rejected with `400` for bookings and availability searches
+  (`check_in` earlier than "now"); input validation lives in the serializers.
+- **Editing rooms:** beds/view changes are refused (`409`) while a confirmed booking has
+  `check_out` in the future, since the guest booked those features. The room row is locked
+  during the update so a concurrent booking can't slip in between the check and the save.
 - **Data integrity:** DB check constraints for beds in 1-5 and `check_out > check_in`;
   `Booking.room` uses `PROTECT` so rooms with history can't be deleted (API returns 409).
 - **`user_id`:** user management is out of scope, so it is a positive integer on the
@@ -78,6 +102,6 @@ curl -X POST localhost:8000/api/bookings/ -H 'Content-Type: application/json' \
 - **Timezones:** `USE_TZ=True`; datetimes should include an offset (naive values are
   interpreted as UTC).
 - **No authentication/permissions** were added, as none were requested.
-- **Not handled / next steps:** cancelling bookings, rejecting check-ins in the past,
-  editing a room's features while it has future bookings (currently allowed),
-  availability search endpoint, and the PostgreSQL exclusion constraint above.
+- **Not handled / next steps:** the PostgreSQL exclusion constraint above, authentication
+  and per-user permissions (anyone can cancel any booking), and rescheduling a booking
+  (currently cancel + rebook).

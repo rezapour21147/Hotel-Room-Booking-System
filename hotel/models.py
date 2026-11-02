@@ -30,12 +30,19 @@ class Room(models.Model):
 
 
 class Booking(models.Model):
-    # User management is out of scope, so the user is just an opaque identifier.
+    class Status(models.TextChoices):
+        CONFIRMED = "confirmed", "Confirmed"
+        CANCELLED = "cancelled", "Cancelled"
+
     user_id = models.PositiveIntegerField(db_index=True)
-    # PROTECT: a room with booking history must not be silently deleted.
     room = models.ForeignKey(Room, on_delete=models.PROTECT, related_name="bookings")
     check_in = models.DateTimeField()
     check_out = models.DateTimeField()
+    # Cancelled bookings are kept for history but no longer block the room.
+    status = models.CharField(
+        max_length=10, choices=Status.choices, default=Status.CONFIRMED
+    )
+    cancelled_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -46,7 +53,7 @@ class Booking(models.Model):
                 name="booking_check_out_after_check_in",
             )
         ]
-        indexes = [models.Index(fields=["room", "check_in", "check_out"])]
+        indexes = [models.Index(fields=["room", "status", "check_in", "check_out"])]
 
     def __str__(self):
         return f"Booking {self.pk}: room {self.room_id} {self.check_in} -> {self.check_out}"
